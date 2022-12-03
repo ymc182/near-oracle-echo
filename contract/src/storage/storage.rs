@@ -3,7 +3,7 @@ use near_sdk::json_types::U128;
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::AccountId;
 pub const MIN_STORAGE_BALANCE: u128 = 100_000_000_000_000_000_000_000;
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize)]
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
 #[serde(crate = "near_sdk::serde")]
 #[cfg_attr(feature = "abi", derive(schemars::JsonSchema))]
 pub struct StorageBalance {

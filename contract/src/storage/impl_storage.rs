@@ -117,6 +117,9 @@ impl StorageManagement for Contract {
     }
 
     fn storage_balance_of(&self, account_id: AccountId) -> Option<StorageBalance> {
+        self.accounts
+            .get(&account_id)
+            .expect("Account is not registered");
         self.internal_storage_balance_of(&account_id)
     }
 }

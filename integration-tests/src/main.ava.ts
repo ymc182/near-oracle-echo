@@ -1,4 +1,4 @@
-import { Worker, NearAccount, parseNEAR } from "near-workspaces";
+import { Worker, NearAccount, parseNEAR, createKeyPair } from "near-workspaces";
 import anyTest, { TestFn } from "ava";
 
 const test = anyTest as TestFn<{
@@ -8,13 +8,18 @@ const test = anyTest as TestFn<{
 
 test.beforeEach(async (t) => {
 	// Init the worker and start a Sandbox server
-	const worker = await Worker.init();
+	const worker = await Worker.init({
+		network: "testnet",
+		testnetMasterAccountId: "ewtd.testnet",
+		initialBalance: "100000000000000000000000000",
+	});
 
 	// Deploy contract
 	const root = worker.rootAccount;
-	const contract = await root.createSubAccount("test-account");
-	// Get wasm file path from package.json test script in folder above
-	await contract.deploy("./out/main.wasm");
+
+	const contract = await root.devDeploy("../out/main.wasm", {
+		initialBalance: parseNEAR("9 NEAR"),
+	});
 
 	await root.call(contract.accountId, "new", {
 		owner_id: root.accountId,
@@ -41,57 +46,17 @@ test("Storage deposit", async (t) => {
 			attachedDeposit: parseNEAR("1 NEAR"),
 		}
 	);
-	const message: string = await root.call(
+
+	let oracle_res: any = await root.call(
 		contract.accountId,
-		"storage_deposit",
-		{},
+		"create_oracle",
 		{
-			attachedDeposit: parseNEAR("2 NEAR"),
+			url: "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd",
+			data: JSON.stringify({ ethereum: { usd: 2000 } }),
+		},
+		{
+			attachedDeposit: parseNEAR("0.000001 NEAR"),
 		}
 	);
-	console.log(message);
-});
-test("STORAGE DEPOSIT SET AND REMOVE", async (t) => {
-	const { root, contract } = t.context.accounts;
-	await root.call(
-		contract.accountId,
-		"storage_deposit",
-		{},
-		{
-			attachedDeposit: parseNEAR("10 NEAR"),
-		}
-	);
-
-	await root.call(contract.accountId, "set_data", {
-		string: "Hello World",
-	});
-	const balance1: any = await contract.view("storage_balance_of", {
-		account_id: root.accountId,
-	});
-
-	await root.call(contract.accountId, "set_data", {
-		string:
-			"I AM A LONGER STRING WHICH TAKES UP MORE SPACE AND THEREFORE COSTS MORE TO STORE, I AM A LONGER STRING WHICH TAKES UP MORE SPACE AND THEREFORE COSTS MORE TO STORE",
-	});
-	const balance2: any = await contract.view("storage_balance_of", {
-		account_id: root.accountId,
-	});
-	await root.call(contract.accountId, "set_data", {
-		string: "Hello World",
-	});
-	const balance3: any = await contract.view("storage_balance_of", {
-		account_id: root.accountId,
-	});
-	t.is(balance2.available < balance1.available, true);
-	t.is(balance3.available > balance2.available, true);
-});
-
-test("Throw error without deposit", async (t) => {
-	const { root, contract } = t.context.accounts;
-
-	await t.throwsAsync(
-		root.call(contract.accountId, "set_data", {
-			string: "Hello World",
-		})
-	);
+	console.log(JSON.parse(oracle_res.data));
 });

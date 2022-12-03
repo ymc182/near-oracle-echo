@@ -1,72 +1,247 @@
 use crate::*;
+use near_sdk::{
+    serde_json::{from_str, Value},
+    PromiseOrValue,
+};
 
+pub trait ExtSelf {
+    fn loop_await_return(&mut self, id: String) -> PromiseOrValue<String>;
+    fn demo_callback(&mut self) -> bool;
+}
+
+type URL = String;
+const MAX_ITERATIONS: u32 = 15;
 #[derive(
     BorshDeserialize, BorshSerialize, Serialize, Deserialize, Clone, PanicOnDefault, Debug,
 )]
 #[serde(crate = "near_sdk::serde")]
-pub struct Data {
-    pub string: String,
-    //boosted: bool,
+pub struct OracleData {
+    pub id: String,
+    pub url: URL,
+    pub data: String,
+    pub timestamp: u64,
+    pub executed: bool,
+    pub return_value: Option<String>,
+    pub creator: AccountId,
 }
-
+//view
 #[near_bindgen]
 impl Contract {
-    pub fn set_data(&mut self, string: String) -> Data {
-        let init_storage = env::storage_usage();
-        let data = Data { string };
-        self.data.insert(&env::predecessor_account_id(), &data);
-        self.cal_storage(init_storage, &env::predecessor_account_id());
-
-        data
-    }
-    pub fn set_data_map(&mut self, data_id: String, string: String) -> Data {
-        let init_storage = env::storage_usage();
-        let mut user_data = self
-            .data_map
-            .get(&env::predecessor_account_id())
-            .unwrap_or_else(|| {
-                LookupMap::new(StorageKey::DataMapInner {
-                    account_hash: env::sha256(env::predecessor_account_id().as_bytes()),
-                })
+    pub fn get_queued_data(&self, from_index: Option<u64>, limit: Option<u64>) -> Vec<OracleData> {
+        let mut data: Vec<OracleData> = vec![];
+        self.queued_data
+            .iter()
+            .skip(from_index.unwrap_or(0) as usize)
+            .take(limit.unwrap_or(50) as usize)
+            .for_each(|(_, v)| {
+                data.push(v);
             });
-        let data = Data { string };
-        user_data.insert(&data_id, &data);
-        self.data_map
-            .insert(&env::predecessor_account_id(), &user_data);
-        self.cal_storage(init_storage, &env::predecessor_account_id());
         data
     }
-    pub fn get_data(&self, account_id: AccountId) -> Data {
-        self.data.get(&account_id).unwrap()
+    pub fn get_queued_data_by_id(&self, id: String) -> Option<OracleData> {
+        self.queued_data.get(&id)
     }
-    pub fn get_data_map(&self, account_id: AccountId, data_id: String) -> Data {
-        let user_data = self.data_map.get(&account_id).unwrap();
-        user_data.get(&data_id).unwrap()
+    pub fn get_queued_data_by_url(
+        &self,
+        url: URL,
+        from_index: Option<u64>,
+        limit: Option<u64>,
+    ) -> Vec<OracleData> {
+        let mut data: Vec<OracleData> = vec![];
+        self.queued_data
+            .iter()
+            .skip(from_index.unwrap_or(0) as usize)
+            .take(limit.unwrap_or(50) as usize)
+            .for_each(|(_, v)| {
+                if v.url == url {
+                    data.push(v);
+                }
+            });
+        data
     }
+    pub fn get_queued_data_by_executed(
+        &self,
+        executed: bool,
+        from_index: Option<u64>,
+        limit: Option<u64>,
+    ) -> Vec<OracleData> {
+        let mut data: Vec<OracleData> = vec![];
+        self.queued_data
+            .iter()
+            .skip(from_index.unwrap_or(0) as usize)
+            .take(limit.unwrap_or(50) as usize)
+            .for_each(|(_, v)| {
+                if v.executed == executed {
+                    data.push(v);
+                }
+            });
+        data
+    }
+}
+impl Contract {
+    pub fn internal_create_oracle(&mut self, url: URL, data: String) -> OracleData {
+        let init_storage = env::storage_usage();
+        let body_json: Value = from_str(&data).unwrap();
+        //create id hash with timestamp and accountId
 
-    pub fn cal_storage(&mut self, init_storage: u64, account_id: &AccountId) {
-        if init_storage < env::storage_usage() {
-            //storage used
-            let total_used_storage = env::storage_usage() - init_storage;
-            self.account_storage_usage += total_used_storage;
-            let mut storage_available_by_user = self.accounts.get(account_id).unwrap();
-            storage_available_by_user.available.0 = storage_available_by_user
-                .available
-                .0
-                .checked_sub(total_used_storage as u128 * env::storage_byte_cost())
-                .unwrap();
-            self.accounts.insert(account_id, &storage_available_by_user);
+        //Vec<u8> to String
+        let id = hex::encode(env::sha256(
+            format!(
+                "{}{}",
+                hex::encode(env::random_seed()),
+                env::predecessor_account_id()
+            )
+            .as_bytes(),
+        ));
+        let oracle_data = OracleData {
+            id: id.to_string(),
+            url,
+            data: body_json.to_string(),
+            timestamp: env::block_timestamp_ms(),
+            executed: false,
+            return_value: None,
+            creator: env::predecessor_account_id(),
+        };
+        self.queued_data.insert(&id, &oracle_data);
+
+        self.cal_storage(init_storage, &env::predecessor_account_id());
+        oracle_data
+    }
+}
+#[near_bindgen]
+impl Contract {
+    #[payable]
+    pub fn create_oracle(&mut self, url: URL, data: String) -> OracleData {
+        require!(
+            env::attached_deposit() >= self.fee_per_call.0,
+            "ERR_NOT_ENOUGH_DEPOSIT"
+        );
+        self.internal_create_oracle(url, data)
+    }
+    #[payable]
+    pub fn create_oracle_await(&mut self, url: URL, data: String) -> PromiseOrValue<String> {
+        require!(
+            env::attached_deposit() >= self.fee_per_call.0,
+            "ERR_NOT_ENOUGH_DEPOSIT"
+        );
+        let oracle_data = self.internal_create_oracle(url, data);
+        PromiseOrValue::Promise(
+            Self::ext(env::current_account_id())
+                .with_unused_gas_weight(100)
+                .loop_await_return(oracle_data.id, 0),
+        )
+    }
+    #[payable]
+    pub fn demo_power(&mut self) -> PromiseOrValue<String> {
+        require!(
+            env::attached_deposit() >= self.fee_per_call.0,
+            "ERR_NOT_ENOUGH_DEPOSIT"
+        );
+        let oracle_data = self.internal_create_oracle(
+            "https://api.coingecko.com/api/v3/simple/price?ids=near&vs_currencies=usd".to_string(),
+            "{}".to_string(),
+        );
+        PromiseOrValue::Promise(
+            Self::ext(env::current_account_id())
+                .with_unused_gas_weight(100)
+                .loop_await_return(oracle_data.id, 0)
+                .then(
+                    Self::ext(env::current_account_id())
+                        .with_unused_gas_weight(100)
+                        .demo_callback(),
+                ),
+        )
+    }
+    //calculate Gas cost of this function
+    pub fn execute_oracle(&mut self, id: String, return_value: String) -> OracleData {
+        /*  let init_storage = env::storage_usage(); */
+        let mut oracle_data = self.queued_data.get(&id).unwrap();
+        oracle_data.executed = true;
+        oracle_data.return_value = Some(return_value);
+        self.queued_data.insert(&oracle_data.id, &oracle_data);
+        /*  self.cal_storage(init_storage, &oracle_data.creator); */
+        oracle_data
+    }
+    pub fn execute_oracle_batch(&mut self, ids: Vec<String>, return_values: Vec<String>) {
+        /*   let init_storage = env::storage_usage(); */
+        for i in 0..ids.len() {
+            let mut oracle_data = self.queued_data.get(&ids[i]).unwrap();
+            oracle_data.executed = true;
+            oracle_data.return_value = Some(return_values[i].to_string());
+            self.queued_data.insert(&oracle_data.id, &oracle_data);
+            /*    self.cal_storage(init_storage, &oracle_data.creator); */
+        }
+    }
+    pub fn delete_oracle_batch(&mut self, ids: Vec<String>) {
+        /*  let init_storage = env::storage_usage(); */
+        for i in 0..ids.len() {
+            let oracle_data = self.queued_data.get(&ids[i]).unwrap();
+            self.queued_data.remove(&ids[i]);
+            /*  self.cal_storage(init_storage, &oracle_data.creator); */
+        }
+    }
+    //calculate Gas cost of this function
+    pub fn delete_oracle(&mut self, id: String) -> bool {
+        /*   let init_storage = env::storage_usage(); */
+
+        if let Some(oracle_data) = self.queued_data.get(&id) {
+            self.queued_data.remove(&id);
+            /*  self.cal_storage(init_storage, &oracle_data.creator); */
+            return true;
+        }
+        false
+    }
+}
+
+/// loop await api return
+#[near_bindgen]
+impl Contract {
+    pub fn loop_await_entry(&mut self, id: String) -> PromiseOrValue<Option<String>> {
+        let data = self.get_queued_data_by_id(id.clone()).unwrap();
+        if data.executed {
+            PromiseOrValue::Value(Some(data.return_value.unwrap()))
         } else {
-            //storage freed
-            let total_freed_storage = init_storage - env::storage_usage();
-            self.account_storage_usage -= total_freed_storage;
-            let mut storage_available_by_user = self.accounts.get(account_id).unwrap();
-            storage_available_by_user.available.0 = storage_available_by_user
-                .available
-                .0
-                .checked_add(total_freed_storage as u128 * env::storage_byte_cost())
-                .unwrap();
-            self.accounts.insert(account_id, &storage_available_by_user);
+            PromiseOrValue::Promise(
+                Self::ext(env::current_account_id())
+                    .with_unused_gas_weight(100)
+                    .loop_await_return(id.clone(), 0),
+            )
+        }
+    }
+    #[private]
+    pub fn loop_await_return(&self, id: String, iteration: u32) -> PromiseOrValue<Option<String>> {
+        if iteration > MAX_ITERATIONS {
+            return PromiseOrValue::Value(None);
+        }
+
+        let data = self.get_queued_data_by_id(id.clone()).unwrap();
+        if data.executed {
+            PromiseOrValue::Value(Some(data.return_value.unwrap()))
+        } else {
+            PromiseOrValue::Promise(
+                Self::ext(env::current_account_id())
+                    .with_unused_gas_weight(100)
+                    .loop_await_return(id.clone(), iteration + 1),
+            )
+        }
+    }
+    #[private]
+    pub fn demo_callback(
+        &mut self,
+        #[callback_result] call_result: Result<String, near_sdk::PromiseError>,
+    ) -> bool {
+        // Return whether or not the promise succeeded using the method outlined in external.rs
+        if call_result.is_err() {
+            return false;
+        } else {
+            env::log_str(
+                format!(
+                    "You have just connected this contract to the real world by getting the near exchange rate from coingecko within this function call - , {}",
+                    call_result.unwrap()
+                )
+                .as_str(),
+            );
+            return true;
         }
     }
 }
